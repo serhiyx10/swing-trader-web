@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 
 # --- 1. CONFIGURACIÓN VISUAL PRO ---
 st.set_page_config(
-    page_title="Boring Capital Screener",
+    page_title="Swing Screener",
     layout="wide",
     page_icon="📈",
     initial_sidebar_state="expanded"
