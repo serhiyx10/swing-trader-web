@@ -1,242 +1,223 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import streamlit.components.v1 as components # Necesario para TradingView
+import time
+import streamlit.components.v1 as components
 
-# --- 1. CONFIGURACIÓN DE LA PÁGINA ---
+# --- 1. CONFIGURACIÓN VISUAL ---
 st.set_page_config(
-    page_title="Terminal Swing Pro", # Puedes cambiar este nombre
+    page_title="Screener Institucional",
     layout="wide",
-    page_icon="🚀",
+    page_icon="💎",
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS para dar aspecto profesional (Modo Oscuro mejorado)
 st.markdown("""
     <style>
-    .metric-card {
-        background-color: #0E1117;
-        border: 1px solid #262730;
-        border-radius: 10px;
-        padding: 15px;
-        text-align: center;
-    }
+    .metric-card { background-color: #0E1117; border: 1px solid #262730; border-radius: 10px; padding: 15px; }
     .stDataFrame { border-radius: 10px; }
-    /* Ajuste para que el widget de TradingView ocupe bien el espacio */
     iframe { width: 100% !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. CEREBRO MATEMÁTICO (Lógica de Fase 2) ---
-@st.cache_data(ttl=3600) # Caché de 1 hora para velocidad
-def analizar_mercado(df_input, min_price, min_vol, limit):
-    # Filtro previo rápido
+# --- 2. CEREBRO MATEMÁTICO (Técnico + Fundamental) ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def analizar_mercado(df_input, min_price, min_vol, usar_fundamentales, limit):
+    # Filtro Inicial (Liquidez)
     candidatos = df_input[
         (df_input['Last Sale'] >= min_price) & 
         (df_input['Volume'] >= min_vol)
     ]['Symbol'].tolist()
     
     if limit:
-        candidatos = candidatos[:50] # Modo rápido
+        candidatos = candidatos[:30] # Limitado para pruebas rápidas
     
     resultados = []
     
     # Barra de progreso
-    progress_text = "Analizando mercado en busca de patrones institucionales..."
-    my_bar = st.progress(0, text=progress_text)
+    progreso_bar = st.progress(0)
+    status_text = st.empty()
+    stop_button = st.button("✋ Detener Análisis")
     
     total = len(candidatos)
     
     for i, ticker in enumerate(candidatos):
+        if stop_button: break
+
         try:
+            status_text.markdown(f"Analizando: **{ticker}** ({i+1}/{total})")
+            time.sleep(0.1) # Freno anti-bloqueo
+            
             stock = yf.Ticker(ticker)
             hist = stock.history(period="1y")
             
             if len(hist) > 200:
-                # Datos actuales
+                # --- A. ANÁLISIS TÉCNICO (El Gráfico) ---
                 precio = hist['Close'].iloc[-1]
                 vol_hoy = hist['Volume'].iloc[-1]
                 vol_medio = hist['Volume'].rolling(50).mean().iloc[-1]
                 
-                # Medias Móviles
                 sma_200 = hist['Close'].rolling(200).mean().iloc[-1]
                 sma_150 = hist['Close'].rolling(150).mean().iloc[-1]
-                sma_50 = hist['Close'].rolling(50).mean().iloc[-1]
+                max_20_dias = hist['High'].iloc[-21:-1].max() # Techo del último mes
                 
-                # LÓGICA DE LA ESTRATEGIA (Fase 2)
-                # 1. Precio encima de medias clave
-                tendencia_alcista = (precio > sma_150) and (precio > sma_200)
-                # 2. Estructura correcta (150 > 200)
-                estructura_medias = sma_150 > sma_200
+                # Condiciones Técnicas (PDF)
+                # 1. Fase 2: Precio encima de medias y medias ordenadas
+                tecnico_fase2 = (precio > sma_150) and (precio > sma_200) and (sma_150 > sma_200)
+                # 2. Cerca de Máximos (High Tight Flag)
+                max_52s = hist['High'].max()
+                cerca_maximos = precio >= (0.85 * max_52s) # A menos de un 15% de máximos anuales
                 
-                if tendencia_alcista and estructura_medias:
-                    # Cálculo de fuerza
-                    vol_rel = vol_hoy / vol_medio if vol_medio > 0 else 0
-                    distancia_media = ((precio - sma_200)/sma_200)
+                if tecnico_fase2 and cerca_maximos:
                     
-                    # Filtro de seguridad: que no esté exageradamente extendida (>60%)
-                    if distancia_media < 0.6: 
+                    # --- B. ANÁLISIS FUNDAMENTAL (Los Balances) ---
+                    pasa_fundamental = True
+                    crecimiento_ventas = 0
+                    crecimiento_eps = 0
+                    market_cap_b = 0
+                    
+                    if usar_fundamentales:
+                        try:
+                            info = stock.info
+                            # Market Cap > 2 Billones ($2B)
+                            mcap = info.get('marketCap', 0)
+                            market_cap_b = round(mcap / 1_000_000_000, 2)
+                            
+                            if market_cap_b < 2.0: 
+                                pasa_fundamental = False
+                            
+                            # Crecimiento Ventas (Revenue Growth) > 25%
+                            # yfinance da 0.25 para 25%
+                            rev_growth = info.get('revenueGrowth', 0)
+                            crecimiento_ventas = round(rev_growth * 100, 2) if rev_growth else 0
+                            
+                            if crecimiento_ventas < 25:
+                                pasa_fundamental = False
+                                
+                            # Crecimiento EPS (Earnings Growth) > 20%
+                            eps_growth = info.get('earningsGrowth', 0)
+                            crecimiento_eps = round(eps_growth * 100, 2) if eps_growth else 0
+                            
+                            if crecimiento_eps < 20:
+                                pasa_fundamental = False
+                                
+                        except:
+                            pasa_fundamental = False # Si no tiene datos, descartamos por seguridad
+                    
+                    # --- C. FILTRO DE ROTURA (Volumen) ---
+                    vol_rel = vol_hoy / vol_medio if vol_medio > 0 else 0
+                    es_rotura = (vol_rel > 1.5) and (precio > max_20_dias)
+                    
+                    # GUARDAR SI CUMPLE TODO
+                    if pasa_fundamental:
+                        nota = "✅ Calidad"
+                        if es_rotura: nota = "💎 ROTURA + CALIDAD"
+                        
                         resultados.append({
                             "Symbol": ticker,
                             "Precio": precio,
                             "Vol_Relativo": vol_rel,
-                            "Dist_SMA200": distancia_media,
-                            "Link": f"https://finviz.com/quote.ashx?t={ticker}", # Enlace a Finviz
-                            "Estado": "🔥 ROTURA" if vol_rel > 1.5 else "✅ Tendencia"
+                            "Ventas_QoQ%": crecimiento_ventas if usar_fundamentales else "N/A",
+                            "EPS_QoQ%": crecimiento_eps if usar_fundamentales else "N/A",
+                            "Mkt_Cap_B": market_cap_b if usar_fundamentales else "N/A",
+                            "Link": f"https://finviz.com/quote.ashx?t={ticker}",
+                            "Estado": nota
                         })
-        except:
-            pass # Si falla un ticker, pasamos al siguiente
+                        
+        except Exception:
+            pass
         
-        # Actualizar barra
-        my_bar.progress((i + 1) / total)
+        progreso_bar.progress((i + 1) / total)
     
-    my_bar.empty() # Borrar barra al terminar
+    progreso_bar.empty()
+    status_text.empty()
+    
     return pd.DataFrame(resultados)
 
-# --- 3. BARRA LATERAL (CONTROLES) ---
+# --- 3. BARRA LATERAL ---
 with st.sidebar:
-    st.title("🛡️ Swing Scanner")
-    st.caption("Terminal de Análisis Institucional")
-    st.divider()
-    
-    uploaded_file = st.file_uploader("📂 1. Cargar 'nasdaq_screener.csv'", type=["csv"])
-    
-    st.subheader("⚙️ 2. Filtros")
-    min_p = st.number_input("Precio Mínimo ($)", 10.0, 1000.0, 15.0)
-    min_v = st.number_input("Volumen Mínimo", 50000, 5000000, 150000)
+    st.title("💎 Sniper Fundamental")
+    uploaded_file = st.file_uploader("1. Sube 'nasdaq_screener.csv'", type=["csv"])
     
     st.divider()
-    modo_turbo = st.toggle("⚡ Modo Turbo (Solo 50)", value=True, help="Desactiva para escanear TODO el mercado (tarda más)")
+    st.subheader("⚙️ Filtros Técnicos")
+    min_p = st.number_input("Precio Mínimo ($)", 10.0, 500.0, 15.0)
+    min_v = st.number_input("Volumen Mínimo", 50000, 5000000, 200000)
     
-    run_btn = st.button("🔍 ESCANEAR AHORA", type="primary", use_container_width=True)
+    st.divider()
+    st.subheader("📊 Filtros de Valor (PDF)")
+    usar_fundamentales = st.toggle("Activar Filtro Fundamental", value=False)
+    if usar_fundamentales:
+        st.info("""
+        **Condiciones Activadas:**
+        - Cap. Mercado > $2B
+        - Ventas (QoQ) > 25%
+        - EPS (QoQ) > 20%
+        """)
     
-    st.info("💡 Consejo: Busca 'Roturas' con Volumen > 2.0x y comprueba noticias.")
+    modo_turbo = st.toggle("⚡ Modo Rápido (50 acciones)", value=True)
+    run_btn = st.button("🔍 ANALIZAR MERCADO", type="primary")
 
-# --- 4. DASHBOARD PRINCIPAL ---
+# --- 4. DASHBOARD ---
 if run_btn and uploaded_file:
     try:
-        # Carga y limpieza
         df_raw = pd.read_csv(uploaded_file)
         df_raw.columns = [c.strip() for c in df_raw.columns]
-        # Limpiar símbolo $ si existe
         if df_raw['Last Sale'].dtype == object:
             df_raw['Last Sale'] = df_raw['Last Sale'].replace({'\$': '', ',': ''}, regex=True).astype(float)
 
-        # Ejecutar Motor
-        df_res = analizar_mercado(df_raw, min_p, min_v, modo_turbo)
+        df_res = analizar_mercado(df_raw, min_p, min_v, usar_fundamentales, modo_turbo)
 
         if not df_res.empty:
-            # --- KPIs (Indicadores Clave) ---
-            top_roturas = df_res[df_res['Estado'] == "🔥 ROTURA"]
-            best_pick = df_res.sort_values('Vol_Relativo', ascending=False).iloc[0]['Symbol']
+            # KPIs
+            roturas = df_res[df_res['Estado'].str.contains("ROTURA")]
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Candidatos Totales", len(df_res))
+            col2.metric("💎 Joyas (Rotura)", len(roturas))
             
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Empresas Escaneadas", len(df_raw) if not modo_turbo else 50)
-            col2.metric("Oportunidades", len(df_res))
-            col3.metric("🔥 Roturas Hoy", len(top_roturas))
-            col4.metric("🏆 Top Volumen", best_pick)
+            # Pestañas
+            tab_tabla, tab_grafico = st.tabs(["📋 Resultados", "📈 Gráfico Pro"])
             
-            st.divider()
-
-            # --- PESTAÑAS DE ANÁLISIS ---
-            tab_table, tab_chart, tab_news = st.tabs(["💎 Tabla Filtrada", "📈 Gráfico Pro", "📰 Noticias y Contexto"])
-            
-            # PESTAÑA 1: TABLA
-            with tab_table:
+            with tab_tabla:
+                cols_config = {
+                    "Symbol": "Ticker",
+                    "Precio": st.column_config.NumberColumn(format="$%.2f"),
+                    "Vol_Relativo": st.column_config.ProgressColumn("Volumen", format="%.1fx", min_value=0, max_value=10),
+                    "Link": st.column_config.LinkColumn("Finviz", display_text="Ver")
+                }
+                # Añadir columnas fundamentales si están activas
+                if usar_fundamentales:
+                    cols_config.update({
+                        "Ventas_QoQ%": st.column_config.NumberColumn("Ventas %", format="%.1f%%"),
+                        "EPS_QoQ%": st.column_config.NumberColumn("EPS %", format="%.1f%%"),
+                        "Mkt_Cap_B": st.column_config.NumberColumn("Cap ($B)", format="%.1fB")
+                    })
+                
                 st.dataframe(
                     df_res.sort_values(by="Vol_Relativo", ascending=False),
-                    column_order=("Symbol", "Precio", "Vol_Relativo", "Dist_SMA200", "Estado", "Link"),
-                    column_config={
-                        "Symbol": "Ticker",
-                        "Precio": st.column_config.NumberColumn(format="$%.2f"),
-                        "Vol_Relativo": st.column_config.ProgressColumn(
-                            "Fuerza Vol.", 
-                            format="%.1fx", 
-                            min_value=0, 
-                            max_value=10,
-                            help="Volumen de hoy vs la media. Buscamos > 1.5x"
-                        ),
-                        "Dist_SMA200": st.column_config.NumberColumn(
-                            "Extensión", 
-                            format="%.1f%%",
-                            help="Distancia a la media de 200. Si es >50%, cuidado."
-                        ),
-                        "Link": st.column_config.LinkColumn(
-                            "Análisis", display_text="Ver en Finviz"
-                        ),
-                        "Estado": st.column_config.TextColumn("Señal")
-                    },
+                    column_config=cols_config,
                     use_container_width=True,
                     height=600
                 )
             
-            # PESTAÑA 2: GRÁFICO TRADINGVIEW
-            with tab_chart:
-                col_sel, col_empty = st.columns([1, 4])
-                with col_sel:
-                    # Selector de Ticker (por defecto el mejor)
-                    ticker_sel = st.selectbox("Selecciona Acción:", df_res.sort_values(by="Vol_Relativo", ascending=False)['Symbol'])
-                
-                # Widget HTML de TradingView
-                tv_widget = f"""
+            with tab_grafico:
+                ticker_sel = st.selectbox("Elige empresa:", df_res['Symbol'])
+                components.html(f"""
                 <div class="tradingview-widget-container" style="height:500px;width:100%">
                   <div id="tradingview_chart"></div>
                   <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
                   <script type="text/javascript">
-                  new TradingView.widget(
-                  {{
-                  "autosize": true,
-                  "symbol": "{ticker_sel}",
-                  "interval": "D",
-                  "timezone": "Etc/UTC",
-                  "theme": "dark",
-                  "style": "1",
-                  "locale": "es",
-                  "toolbar_bg": "#f1f3f6",
-                  "enable_publishing": false,
-                  "allow_symbol_change": true,
-                  "container_id": "tradingview_chart"
-                  }}
-                  );
+                  new TradingView.widget({{
+                  "autosize": true, "symbol": "{ticker_sel}", "interval": "D", "timezone": "Etc/UTC", "theme": "dark", "style": "1", "locale": "es", "toolbar_bg": "#f1f3f6", "enable_publishing": false, "allow_symbol_change": true, "container_id": "tradingview_chart"
+                  }});
                   </script>
                 </div>
-                """
-                components.html(tv_widget, height=500)
-            
-            # PESTAÑA 3: NOTICIAS
-            with tab_news:
-                st.subheader(f"🗞️ Últimas noticias de {ticker_sel}")
-                st.caption("Fuente: Yahoo Finance Live")
-                try:
-                    tick_obj = yf.Ticker(ticker_sel)
-                    news = tick_obj.news
-                    
-                    if news:
-                        for n in news[:5]: # Top 5 noticias
-                            with st.container():
-                                # Diseño limpio de noticia
-                                st.markdown(f"#### [{n['title']}]({n['link']})")
-                                if 'publisher' in n:
-                                    st.caption(f"Publicado por: {n['publisher']}")
-                                st.divider()
-                    else:
-                        st.info("No se encontraron noticias recientes para este valor.")
-                except Exception as e:
-                    st.warning("No se pudieron cargar las noticias en este momento.")
+                """, height=500)
 
         else:
-            st.warning("⚠️ No se encontraron empresas. Intenta bajar el precio mínimo o el volumen.")
+            st.warning("Ninguna empresa cumplió los criterios. ¡El mercado está difícil hoy!")
             
     except Exception as e:
-        st.error(f"Error procesando el archivo: {e}")
-
+        st.error(f"Error: {e}")
 else:
-    # PANTALLA DE INICIO (Cuando no has subido nada)
-    st.markdown("""
-    <div style='text-align: center; padding-top: 50px;'>
-        <h1>👋 Bienvenido a tu Terminal</h1>
-        <p style='font-size: 18px; color: gray;'>
-            Sube el archivo <b>nasdaq_screener.csv</b> en la barra lateral para comenzar.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.info("👋 Sube tu archivo CSV para empezar.")
